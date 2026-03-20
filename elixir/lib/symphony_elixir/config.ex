@@ -28,6 +28,12 @@ defmodule SymphonyElixir.Config do
   @default_max_concurrent_agents 10
   @default_agent_max_turns 20
   @default_max_retry_backoff_ms 300_000
+  @default_agent_backend "codex"
+  @default_claude_model "sonnet"
+  @default_claude_permission_mode "accept_edits"
+  @default_claude_turn_timeout_ms 3_600_000
+  @default_claude_max_sdk_turns 0
+  @default_claude_stall_timeout_ms 300_000
   @default_codex_command "codex app-server"
   @default_codex_turn_timeout_ms 3_600_000
   @default_codex_read_timeout_ms 5_000
@@ -61,6 +67,11 @@ defmodule SymphonyElixir.Config do
                                  terminal_states: [
                                    type: {:list, :string},
                                    default: @default_terminal_states
+                                 ],
+                                 repo: [type: {:or, [:string, nil]}, default: nil],
+                                 project_number: [
+                                   type: {:or, [:non_neg_integer, nil]},
+                                   default: nil
                                  ]
                                ]
                              ],
@@ -82,6 +93,10 @@ defmodule SymphonyElixir.Config do
                                type: :map,
                                default: %{},
                                keys: [
+                                 backend: [
+                                   type: :string,
+                                   default: @default_agent_backend
+                                 ],
                                  max_concurrent_agents: [
                                    type: :integer,
                                    default: @default_max_concurrent_agents
@@ -97,6 +112,40 @@ defmodule SymphonyElixir.Config do
                                  max_concurrent_agents_by_state: [
                                    type: {:map, :string, :pos_integer},
                                    default: %{}
+                                 ]
+                               ]
+                             ],
+                             claude: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 model: [
+                                   type: :string,
+                                   default: @default_claude_model
+                                 ],
+                                 system_prompt: [
+                                   type: {:or, [:string, nil]},
+                                   default: nil
+                                 ],
+                                 permission_mode: [
+                                   type: :string,
+                                   default: @default_claude_permission_mode
+                                 ],
+                                 turn_timeout_ms: [
+                                   type: :pos_integer,
+                                   default: @default_claude_turn_timeout_ms
+                                 ],
+                                 max_sdk_turns: [
+                                   type: :non_neg_integer,
+                                   default: @default_claude_max_sdk_turns
+                                 ],
+                                 allowed_tools: [
+                                   type: {:list, :string},
+                                   default: []
+                                 ],
+                                 stall_timeout_ms: [
+                                   type: :non_neg_integer,
+                                   default: @default_claude_stall_timeout_ms
                                  ]
                                ]
                              ],
@@ -219,6 +268,34 @@ defmodule SymphonyElixir.Config do
     get_in(validated_workflow_options(), [:tracker, :terminal_states])
   end
 
+  @spec github_api_token() :: String.t() | nil
+  def github_api_token do
+    validated_workflow_options()
+    |> get_in([:tracker, :api_key])
+    |> resolve_env_value(System.get_env("GITHUB_TOKEN"))
+    |> normalize_secret_value()
+  end
+
+  @spec github_repo() :: String.t() | nil
+  def github_repo do
+    get_in(validated_workflow_options(), [:tracker, :repo])
+  end
+
+  @spec github_project_number() :: non_neg_integer() | nil
+  def github_project_number do
+    get_in(validated_workflow_options(), [:tracker, :project_number])
+  end
+
+  @spec tracker_active_states() :: [String.t()]
+  def tracker_active_states do
+    get_in(validated_workflow_options(), [:tracker, :active_states])
+  end
+
+  @spec tracker_terminal_states() :: [String.t()]
+  def tracker_terminal_states do
+    get_in(validated_workflow_options(), [:tracker, :terminal_states])
+  end
+
   @spec poll_interval_ms() :: pos_integer()
   def poll_interval_ms do
     get_in(validated_workflow_options(), [:polling, :interval_ms])
@@ -262,6 +339,52 @@ defmodule SymphonyElixir.Config do
   @spec agent_max_turns() :: pos_integer()
   def agent_max_turns do
     get_in(validated_workflow_options(), [:agent, :max_turns])
+  end
+
+  @spec agent_backend_kind() :: String.t()
+  def agent_backend_kind do
+    get_in(validated_workflow_options(), [:agent, :backend])
+  end
+
+  @spec claude_model() :: String.t()
+  def claude_model do
+    get_in(validated_workflow_options(), [:claude, :model])
+  end
+
+  @spec claude_system_prompt() :: String.t() | nil
+  def claude_system_prompt do
+    get_in(validated_workflow_options(), [:claude, :system_prompt])
+  end
+
+  @spec claude_permission_mode() :: atom()
+  def claude_permission_mode do
+    validated_workflow_options()
+    |> get_in([:claude, :permission_mode])
+    |> String.to_existing_atom()
+  rescue
+    ArgumentError -> :accept_edits
+  end
+
+  @spec claude_turn_timeout_ms() :: pos_integer()
+  def claude_turn_timeout_ms do
+    get_in(validated_workflow_options(), [:claude, :turn_timeout_ms])
+  end
+
+  @spec claude_max_sdk_turns() :: non_neg_integer()
+  def claude_max_sdk_turns do
+    get_in(validated_workflow_options(), [:claude, :max_sdk_turns])
+  end
+
+  @spec claude_allowed_tools() :: [String.t()]
+  def claude_allowed_tools do
+    get_in(validated_workflow_options(), [:claude, :allowed_tools])
+  end
+
+  @spec claude_stall_timeout_ms() :: non_neg_integer()
+  def claude_stall_timeout_ms do
+    validated_workflow_options()
+    |> get_in([:claude, :stall_timeout_ms])
+    |> max(0)
   end
 
   @spec max_concurrent_agents_for_state(term()) :: pos_integer()
@@ -367,6 +490,8 @@ defmodule SymphonyElixir.Config do
          :ok <- require_tracker_kind(),
          :ok <- require_linear_token(),
          :ok <- require_linear_project(),
+         :ok <- require_github_token(),
+         :ok <- require_github_repo(),
          :ok <- require_valid_codex_runtime_settings() do
       require_codex_command()
     end
@@ -389,6 +514,7 @@ defmodule SymphonyElixir.Config do
   defp require_tracker_kind do
     case tracker_kind() do
       "linear" -> :ok
+      "github" -> :ok
       "memory" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
@@ -423,18 +549,54 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  defp require_github_token do
+    case tracker_kind() do
+      "github" ->
+        if is_binary(github_api_token()) do
+          :ok
+        else
+          {:error, :missing_github_api_token}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp require_github_repo do
+    case tracker_kind() do
+      "github" ->
+        if is_binary(github_repo()) do
+          :ok
+        else
+          {:error, :missing_github_repo}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   defp require_codex_command do
-    if byte_size(String.trim(codex_command())) > 0 do
+    if agent_backend_kind() != "codex" do
       :ok
     else
-      {:error, :missing_codex_command}
+      if byte_size(String.trim(codex_command())) > 0 do
+        :ok
+      else
+        {:error, :missing_codex_command}
+      end
     end
   end
 
   defp require_valid_codex_runtime_settings do
-    case codex_runtime_settings() do
-      {:ok, _settings} -> :ok
-      {:error, reason} -> {:error, reason}
+    if agent_backend_kind() != "codex" do
+      :ok
+    else
+      case codex_runtime_settings() do
+        {:ok, _settings} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -450,6 +612,7 @@ defmodule SymphonyElixir.Config do
       polling: extract_polling_options(section_map(config, "polling")),
       workspace: extract_workspace_options(section_map(config, "workspace")),
       agent: extract_agent_options(section_map(config, "agent")),
+      claude: extract_claude_options(section_map(config, "claude")),
       codex: extract_codex_options(section_map(config, "codex")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       observability: extract_observability_options(section_map(config, "observability")),
@@ -465,6 +628,8 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
+    |> put_if_present(:repo, scalar_string_value(Map.get(section, "repo")))
+    |> put_if_present(:project_number, non_negative_integer_value(Map.get(section, "project_number")))
   end
 
   defp extract_polling_options(section) do
@@ -479,6 +644,7 @@ defmodule SymphonyElixir.Config do
 
   defp extract_agent_options(section) do
     %{}
+    |> put_if_present(:backend, scalar_string_value(Map.get(section, "backend")))
     |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
     |> put_if_present(:max_turns, positive_integer_value(Map.get(section, "max_turns")))
     |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(section, "max_retry_backoff_ms")))
@@ -486,6 +652,17 @@ defmodule SymphonyElixir.Config do
       :max_concurrent_agents_by_state,
       state_limits_value(Map.get(section, "max_concurrent_agents_by_state"))
     )
+  end
+
+  defp extract_claude_options(section) do
+    %{}
+    |> put_if_present(:model, scalar_string_value(Map.get(section, "model")))
+    |> put_if_present(:system_prompt, binary_value(Map.get(section, "system_prompt"), allow_empty: true))
+    |> put_if_present(:permission_mode, scalar_string_value(Map.get(section, "permission_mode")))
+    |> put_if_present(:turn_timeout_ms, positive_integer_value(Map.get(section, "turn_timeout_ms")))
+    |> put_if_present(:max_sdk_turns, non_negative_integer_value(Map.get(section, "max_sdk_turns")))
+    |> put_if_present(:allowed_tools, csv_value(Map.get(section, "allowed_tools")))
+    |> put_if_present(:stall_timeout_ms, non_negative_integer_value(Map.get(section, "stall_timeout_ms")))
   end
 
   defp extract_codex_options(section) do

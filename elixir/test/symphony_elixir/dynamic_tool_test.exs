@@ -142,7 +142,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "`linear_graphql` requires a non-empty `query` string."
+               "message" => "GraphQL tool requires a non-empty `query` string."
              }
            }
   end
@@ -206,7 +206,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "`linear_graphql` requires a non-empty `query` string."
+               "message" => "GraphQL tool requires a non-empty `query` string."
              }
            }
 
@@ -242,7 +242,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "`linear_graphql` expects either a GraphQL query string or an object with `query` and optional `variables`."
+               "message" => "GraphQL tool expects either a GraphQL query string or an object with `query` and optional `variables`."
              }
            }
   end
@@ -267,7 +267,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "`linear_graphql.variables` must be a JSON object when provided."
+               "message" => "GraphQL `variables` must be a JSON object when provided."
              }
            }
   end
@@ -353,7 +353,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(text) == %{
              "error" => %{
-               "message" => "Linear GraphQL tool execution failed.",
+               "message" => "GraphQL tool execution failed.",
                "reason" => ":boom"
              }
            }

@@ -391,12 +391,24 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_project_link_lines do
     project_part =
-      case Config.linear_project_slug() do
-        project_slug when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
+      case Config.tracker_kind() do
+        "github" ->
+          case Config.github_repo() do
+            repo when is_binary(repo) and repo != "" ->
+              colorize(github_project_url(repo, Config.github_project_number()), @ansi_cyan)
+
+            _ ->
+              colorize("n/a", @ansi_gray)
+          end
 
         _ ->
-          colorize("n/a", @ansi_gray)
+          case Config.linear_project_slug() do
+            project_slug when is_binary(project_slug) and project_slug != "" ->
+              colorize(linear_project_url(project_slug), @ansi_cyan)
+
+            _ ->
+              colorize("n/a", @ansi_gray)
+          end
       end
 
     project_line = colorize("│ Project: ", @ansi_bold) <> project_part
@@ -425,6 +437,14 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
+
+  defp github_project_url(repo, project_number) when is_integer(project_number) do
+    "https://github.com/#{repo}/projects/#{project_number}"
+  end
+
+  defp github_project_url(repo, _project_number) do
+    "https://github.com/#{repo}/issues"
+  end
 
   defp dashboard_url do
     dashboard_url(Config.server_host(), Config.server_port(), HttpServer.bound_port())
