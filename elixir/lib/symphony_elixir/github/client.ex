@@ -8,35 +8,39 @@ defmodule SymphonyElixir.GitHub.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
-  @github_graphql_endpoint "https://api.github.com/graphql"
+  @default_github_graphql_endpoint "https://api.github.com/graphql"
 
-  @project_items_query """
+  @project_items_fragment """
+  items(first: $first, after: $after) {
+    nodes {
+      id
+      fieldValueByName(name: "Status") {
+        ... on ProjectV2ItemFieldSingleSelectValue { name }
+      }
+      content {
+        ... on Issue {
+          id
+          number
+          title
+          body
+          state
+          url
+          createdAt
+          updatedAt
+          assignees(first: 5) { nodes { login } }
+          labels(first: 20) { nodes { name } }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+  """
+
+  @project_items_org_query """
   query SymphonyGitHubProjectItems($owner: String!, $projectNumber: Int!, $first: Int!, $after: String) {
     organization(login: $owner) {
       projectV2(number: $projectNumber) {
-        items(first: $first, after: $after) {
-          nodes {
-            id
-            fieldValueByName(name: "Status") {
-              ... on ProjectV2ItemFieldSingleSelectValue { name }
-            }
-            content {
-              ... on Issue {
-                id
-                number
-                title
-                body
-                state
-                url
-                createdAt
-                updatedAt
-                assignees(first: 5) { nodes { login } }
-                labels(first: 20) { nodes { name } }
-              }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
+        #{@project_items_fragment}
       }
     }
   }
@@ -46,29 +50,7 @@ defmodule SymphonyElixir.GitHub.Client do
   query SymphonyGitHubProjectItemsUser($owner: String!, $projectNumber: Int!, $first: Int!, $after: String) {
     user(login: $owner) {
       projectV2(number: $projectNumber) {
-        items(first: $first, after: $after) {
-          nodes {
-            id
-            fieldValueByName(name: "Status") {
-              ... on ProjectV2ItemFieldSingleSelectValue { name }
-            }
-            content {
-              ... on Issue {
-                id
-                number
-                title
-                body
-                state
-                url
-                createdAt
-                updatedAt
-                assignees(first: 5) { nodes { login } }
-                labels(first: 20) { nodes { name } }
-              }
-            }
-          }
-          pageInfo { hasNextPage endCursor }
-        }
+        #{@project_items_fragment}
       }
     }
   }
@@ -124,85 +106,56 @@ defmodule SymphonyElixir.GitHub.Client do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    repo = Config.github_repo()
-    Logger.info("GitHub.Client.fetch_candidate_issues called — repo=#{inspect(repo)} project=#{inspect(Config.github_project_number())} has_token=#{is_binary(Config.github_api_token())}")
+    with {:ok, repo, {owner, repo_name}} <- resolve_repo_config() do
+      active_states = Config.tracker_active_states()
 
-    cond do
-      is_nil(Config.github_api_token()) ->
-        {:error, :missing_github_api_token}
+      case Config.github_project_number() do
+        project_number when is_integer(project_number) ->
+          fetch_project_items(owner, project_number, active_states, repo)
 
-      is_nil(repo) ->
-        {:error, :missing_github_repo}
-
-      true ->
-        {owner, repo_name} = parse_repo!(repo)
-        active_states = Config.tracker_active_states()
-
-        case Config.github_project_number() do
-          project_number when is_integer(project_number) ->
-            fetch_project_items(owner, project_number, active_states)
-
-          nil ->
-            github_states = active_states_to_github_states(active_states)
-            fetch_repo_issues(owner, repo_name, github_states)
-        end
+        nil ->
+          fetch_repo_issues(owner, repo_name, active_states_to_github_states(active_states), repo)
+      end
     end
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states([]), do: {:ok, []}
+
   def fetch_issues_by_states(state_names) when is_list(state_names) do
-    if state_names == [] do
-      {:ok, []}
-    else
-      repo = Config.github_repo()
+    with {:ok, repo, {owner, repo_name}} <- resolve_repo_config() do
+      case Config.github_project_number() do
+        project_number when is_integer(project_number) ->
+          fetch_project_items(owner, project_number, state_names, repo)
 
-      cond do
-        is_nil(Config.github_api_token()) ->
-          {:error, :missing_github_api_token}
-
-        is_nil(repo) ->
-          {:error, :missing_github_repo}
-
-        true ->
-          {owner, repo_name} = parse_repo!(repo)
-
-          case Config.github_project_number() do
-            project_number when is_integer(project_number) ->
-              fetch_project_items(owner, project_number, state_names)
-
-            nil ->
-              github_states = active_states_to_github_states(state_names)
-              fetch_repo_issues(owner, repo_name, github_states)
-          end
+        nil ->
+          fetch_repo_issues(owner, repo_name, active_states_to_github_states(state_names), repo)
       end
     end
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids([]), do: {:ok, []}
+
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
+    repo = Config.github_repo()
 
-    if ids == [] do
-      {:ok, []}
-    else
-      repo = Config.github_repo()
+    case graphql(@issues_by_ids_query, %{ids: ids}) do
+      {:ok, %{"data" => %{"nodes" => nodes}}} when is_list(nodes) ->
+        issues =
+          nodes
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map(&normalize_issue_by_id(&1, repo))
+          |> Enum.reject(&is_nil/1)
 
-      case graphql(@issues_by_ids_query, %{ids: ids}) do
-        {:ok, %{"data" => %{"nodes" => nodes}}} when is_list(nodes) ->
-          issues =
-            nodes
-            |> Enum.reject(&is_nil/1)
-            |> Enum.map(&normalize_issue_by_id(&1, repo))
-            |> Enum.reject(&is_nil/1)
+        {:ok, issues}
 
-          {:ok, issues}
+      {:ok, %{"errors" => errors}} ->
+        {:error, {:github_graphql_errors, errors}}
 
-        {:ok, %{"errors" => errors}} ->
-          {:error, {:github_graphql_errors, errors}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -219,7 +172,7 @@ defmodule SymphonyElixir.GitHub.Client do
       {:ok, response} ->
         Logger.error(
           "GitHub GraphQL request failed status=#{response.status}" <>
-            github_error_context(payload, response)
+            github_error_context(response)
         )
 
         {:error, {:github_api_status, response.status}}
@@ -242,20 +195,43 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
+  @doc false
+  @spec normalize_project_item_for_test(map(), String.t()) :: Issue.t() | nil
+  def normalize_project_item_for_test(item, repo), do: normalize_project_item(item, repo)
+
+  @doc false
+  @spec normalize_repo_issue_for_test(map(), String.t()) :: Issue.t() | nil
+  def normalize_repo_issue_for_test(issue, repo), do: normalize_repo_issue(issue, repo)
+
+  @doc false
+  @spec normalize_issue_by_id_for_test(map(), String.t()) :: Issue.t() | nil
+  def normalize_issue_by_id_for_test(node, repo), do: normalize_issue_by_id(node, repo)
+
   # -- Private -----------------------------------------------------------------
 
-  defp parse_repo!(repo) do
-    case parse_repo(repo) do
-      {:ok, result} -> result
-      {:error, reason} -> raise ArgumentError, "Invalid GitHub repo format #{inspect(repo)}: #{inspect(reason)}"
+  defp resolve_repo_config do
+    cond do
+      is_nil(Config.github_api_token()) ->
+        {:error, :missing_github_api_token}
+
+      is_nil(Config.github_repo()) ->
+        {:error, :missing_github_repo}
+
+      true ->
+        repo = Config.github_repo()
+
+        case parse_repo(repo) do
+          {:ok, {owner, repo_name}} -> {:ok, repo, {owner, repo_name}}
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
-  defp fetch_project_items(owner, project_number, filter_states) do
-    fetch_project_items_page(owner, project_number, filter_states, nil, [])
+  defp fetch_project_items(owner, project_number, filter_states, repo) do
+    fetch_project_items_page(owner, project_number, filter_states, repo, nil, [])
   end
 
-  defp fetch_project_items_page(owner, project_number, filter_states, after_cursor, acc) do
+  defp fetch_project_items_page(owner, project_number, filter_states, repo, after_cursor, acc) do
     variables = %{
       owner: owner,
       projectNumber: project_number,
@@ -263,9 +239,7 @@ defmodule SymphonyElixir.GitHub.Client do
       after: after_cursor
     }
 
-    repo = Config.github_repo()
-
-    with {:ok, body} <- graphql_with_owner_fallback(owner, project_number, variables),
+    with {:ok, body} <- graphql_with_owner_fallback(variables),
          {:ok, items, page_info} <- decode_project_items_response(body) do
       issues =
         items
@@ -277,7 +251,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          fetch_project_items_page(owner, project_number, filter_states, next_cursor, updated_acc)
+          fetch_project_items_page(owner, project_number, filter_states, repo, next_cursor, updated_acc)
 
         :done ->
           {:ok, Enum.reverse(updated_acc)}
@@ -288,8 +262,8 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp graphql_with_owner_fallback(_owner, _project_number, variables) do
-    case graphql(@project_items_query, variables) do
+  defp graphql_with_owner_fallback(variables) do
+    case graphql(@project_items_org_query, variables) do
       {:ok, %{"data" => %{"organization" => %{"projectV2" => _}}}} = success ->
         success
 
@@ -301,13 +275,11 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp fetch_repo_issues(owner, repo_name, github_states) do
-    fetch_repo_issues_page(owner, repo_name, github_states, nil, [])
+  defp fetch_repo_issues(owner, repo_name, github_states, repo) do
+    fetch_repo_issues_page(owner, repo_name, github_states, repo, nil, [])
   end
 
-  defp fetch_repo_issues_page(owner, repo_name, github_states, after_cursor, acc) do
-    repo = Config.github_repo()
-
+  defp fetch_repo_issues_page(owner, repo_name, github_states, repo, after_cursor, acc) do
     variables = %{
       owner: owner,
       repo: repo_name,
@@ -330,7 +302,7 @@ defmodule SymphonyElixir.GitHub.Client do
 
         case next_page_cursor(page_info) do
           {:ok, next_cursor} ->
-            fetch_repo_issues_page(owner, repo_name, github_states, next_cursor, updated_acc)
+            fetch_repo_issues_page(owner, repo_name, github_states, repo, next_cursor, updated_acc)
 
           :done ->
             {:ok, Enum.reverse(updated_acc)}
@@ -347,14 +319,10 @@ defmodule SymphonyElixir.GitHub.Client do
     end
   end
 
-  defp decode_project_items_response(%{"data" => data} = response) do
-    Logger.info("GitHub: decode_project_items_response data keys: #{inspect(Map.keys(data))}")
-
+  defp decode_project_items_response(%{"data" => data}) do
     project_data =
       get_in(data, ["organization", "projectV2"]) ||
         get_in(data, ["user", "projectV2"])
-
-    Logger.info("GitHub: project_data: #{inspect(project_data != nil)}")
 
     case project_data do
       %{"items" => %{"nodes" => nodes, "pageInfo" => page_info}} when is_list(nodes) ->
@@ -364,7 +332,6 @@ defmodule SymphonyElixir.GitHub.Client do
         }}
 
       nil ->
-        Logger.error("GitHub: project_data is nil! Full response keys: #{inspect(Map.keys(response))}, data: #{inspect(data) |> String.slice(0, 300)}")
         {:error, :github_project_not_found}
 
       _ ->
@@ -373,7 +340,6 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp decode_project_items_response(%{"errors" => errors}) do
-    Logger.error("GitHub: decode got errors-only response: #{inspect(errors) |> String.slice(0, 200)}")
     {:error, {:github_graphql_errors, errors}}
   end
 
@@ -442,9 +408,7 @@ defmodule SymphonyElixir.GitHub.Client do
     case node do
       %{"id" => id} when is_binary(id) ->
         status_value =
-          node
-          |> get_in(["projectItems", "nodes"])
-          |> case do
+          case get_in(node, ["projectItems", "nodes"]) do
             [%{"fieldValueByName" => %{"name" => name}} | _] when is_binary(name) -> name
             _ -> nil
           end
@@ -521,9 +485,15 @@ defmodule SymphonyElixir.GitHub.Client do
     states
     |> Enum.map(&normalize_state/1)
     |> Enum.flat_map(fn
-      state when state in ["open", "todo", "in progress"] -> ["OPEN"]
-      state when state in ["closed", "done", "cancelled", "canceled", "duplicate"] -> ["CLOSED"]
-      _ -> ["OPEN"]
+      state when state in ["open", "todo", "in progress"] ->
+        ["OPEN"]
+
+      state when state in ["closed", "done", "cancelled", "canceled", "duplicate"] ->
+        ["CLOSED"]
+
+      unknown ->
+        Logger.warning("GitHub: no IssueState mapping for #{inspect(unknown)}, defaulting to OPEN")
+        ["OPEN"]
     end)
     |> Enum.uniq()
   end
@@ -560,14 +530,18 @@ defmodule SymphonyElixir.GitHub.Client do
   end
 
   defp post_graphql_request(payload, headers) do
-    Req.post(@github_graphql_endpoint,
+    Req.post(github_graphql_endpoint(),
       headers: headers,
       json: payload,
       connect_options: [timeout: 30_000]
     )
   end
 
-  defp github_error_context(_payload, response) do
+  defp github_graphql_endpoint do
+    Application.get_env(:symphony_elixir, :github_graphql_endpoint, @default_github_graphql_endpoint)
+  end
+
+  defp github_error_context(response) do
     body =
       response
       |> Map.get(:body)

@@ -290,7 +290,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(missing_token_text) == %{
              "error" => %{
-               "message" => "Symphony is missing Linear auth. Set `linear.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+               "message" => "Symphony is missing Linear auth. Set `tracker.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
              }
            }
 
@@ -329,7 +329,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(request_error_text) == %{
              "error" => %{
-               "message" => "Linear GraphQL request failed before receiving a successful response.",
+               "message" => "Linear GraphQL request failed.",
                "reason" => ":timeout"
              }
            }
